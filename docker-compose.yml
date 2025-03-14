@@ -1,0 +1,138 @@
+services:
+  web:
+    image: php:8.3-apache
+    container_name: COMP3335_web
+    build: ./php
+    depends_on:
+      - percona
+    env_file:
+      - .env
+    volumes:
+      - ./src:/var/www/html
+    ports:
+      - "80:80"
+
+  percona:
+    image: percona:8.0.36-28
+    platform: linux/amd64
+    container_name: COMP3335_db
+    build: ./percona
+    env_file:
+      - .env
+    volumes:
+      - ./percona/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - mysql-data:/var/lib/mysql
+    secrets:
+      - source: keyring_vault_conf
+        target: /run/secrets/keyring_vault.conf
+        mode: 0440  # read-only access
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "percona"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    command: > 
+      --plugin-load=audit_log=audit_log.so
+      --default-table-encryption=ON
+      --early-plugin-load=keyring_vault=keyring_vault.so
+      --loose-keyring-vault-config=/run/secrets/keyring_vault.conf
+    depends_on:
+      vault:
+        condition: service_healthy
+
+  vault:
+    image: vault:1.13.3
+    container_name: COMP3335_vault
+    restart: on-failure:10
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_ADDR: 'http://127.0.0.1:8200'
+      VAULT_DEV_ROOT_TOKEN_ID: '00000000-0000-0000-0000-000000000000'
+    cap_add:
+      - IPC_LOCK
+    command: server -dev -dev-root-token-id="00000000-0000-0000-0000-000000000000"
+    healthcheck:
+      test: ["CMD", "vault", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  mysqld-exporter:
+    image: prom/mysqld-exporter
+    container_name: COMP3335_mysqld_exporter
+    depends_on:
+      percona:
+        condition: service_healthy
+    command:
+      - --config.my-cnf=/cfg/.my.cnf
+    volumes:
+      - ./mysqld-exporter/.my.cnf:/cfg/.my.cnf:ro
+    ports:
+      - "9104:9104"
+
+  prometheus:
+    image: prom/prometheus
+    container_name: COMP3335_prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana
+    container_name: COMP3335_grafana
+    env_file:
+      - .env
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
+      - ./grafana/provisioning/alerting:/etc/grafana/provisioning/alerting
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+
+  loki:
+    image: grafana/loki
+    container_name: COMP3335_loki
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki/config.yml:/etc/loki/config.yml
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3100/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  promtail:
+    image: grafana/promtail
+    container_name: COMP3335_promtail
+    volumes:
+      - ./loki/promtail-config.yml:/etc/promtail/config.yml
+      - ./loki/positions:/etc/promtail/positions
+      - mysql-data:/var/lib/mysql
+    depends_on:
+      - loki
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    platform: linux/amd64
+    container_name: COMP3335_phpmyadmin
+    env_file:
+      - .env
+    ports:
+      - "8081:80"
+
+volumes:
+  mysql-data:    # Declare MySQL data
+  grafana-data:  # Declare Grafana data
+
+secrets:
+  keyring_vault_conf:
+    file: ./percona/keyring_vault.conf
